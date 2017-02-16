@@ -2,6 +2,7 @@
 from __future__ import unicode_literals
 
 import random
+from itertools import chain
 from threading import local
 from .utils import import_string
 from django.utils.six import string_types
@@ -29,24 +30,43 @@ class ReplicationRouter(object):
         self.wrapped_router = wrapped_router_cls()
 
         db_to_slaves = {}
-        for db, db_conf in self.DATABASES.items():
-            db_master = db_conf.get('SLAVE_TO')
-            if db_master:
-                db_to_slaves.setdefault(db_master, []).append(db)
+        db_to_sync_slaves = {}
+        db_to_other_masters = {}
+        replica_kinds = (
+            # (settings_key, mapping)
+            ('SLAVE_TO', db_to_slaves),
+            ('SUBMASTER_TO', db_to_other_masters),
+            ('SYNC_SLAVE_TO', db_to_sync_slaves),
+        )
+        for db_name, db_conf in self.DATABASES.items():
+            for conf_key, target_mapping in replica_kinds:
+                conf_value = db_conf.get(conf_key)  # e.g. the name of the master database
+                if conf_value:
+                    # e.g. associate the current db as slave to that master database.
+                    target_mapping.setdefault(conf_value, []).append(db_name)
 
+        self.db_to_slaves = db_to_slaves
+        self.db_to_sync_slaves = db_to_sync_slaves
+        self.db_to_other_masters = db_to_other_masters
+
+        # Legacy support: separate option with a list of slaves.
+        # Append + uniq to the existing list.
         if self.SLAVES_LEGACY:
             def_slaves = db_to_slaves.get(self.DEFAULT_DB_ALIAS, [])
             def_slaves.extend(self.SLAVES_LEGACY)
             def_slaves = list(set(def_slaves))
             db_to_slaves[self.DEFAULT_DB_ALIAS] = def_slaves
 
+        # Mapping from the database to its primary master, for `allow_relation`.
         db_to_master = {}
-        for db, db_slaves in db_to_slaves.items():
+        all_mappings = chain(
+            db_to_slaves.items(), db_to_sync_slaves.items(),
+            db_to_other_masters.items())
+        for db_name, db_slaves in all_mappings:
             for db_slave in db_slaves:
-                db_to_master[db_slave] = db
+                db_to_master[db_slave] = db_name
 
         self.db_to_master = db_to_master
-        self.db_to_slaves = db_to_slaves
 
     def _init_context(self):
         self._context.state_stack = []
@@ -103,24 +123,27 @@ class ReplicationRouter(object):
         return "{}__{}".format(state, db)
 
     def db_for_write(self, model, **hints):
-        if self.CHECK_STATE_ON_WRITE and self.state() != 'master':
-            raise RuntimeError('Trying to access master database in slave state')
+        if self.state() != 'master':
+            if self.CHECK_STATE_ON_WRITE:
+                raise RuntimeError('Trying to access master database in slave state')
+            # (?) else: self.use_state('master'); but would need a revert too.
+            # (?) else: self.context.state_stack[-1] = 'master'  # self.override_state('master')
 
-        db = self.wrapped_router.db_for_write(model, **hints)
-        assert db in self.DATABASES, \
+        db_name = self.wrapped_router.db_for_write(model, **hints)
+        assert db_name in self.DATABASES, \
             "wrapped router's db_for_write should return a known database"
-        key = self._make_db_key(db)
-        self.context.chosen[key] = db
-        return db
+        key = self._make_db_key(db_name)
+        self.context.chosen[key] = db_name
+        return db_name
 
     def db_for_read(self, model, **hints):
         if self.state() == 'master':
             return self.db_for_write(model, **hints)
 
-        db = self.wrapped_router.db_for_read(model, **hints)
-        assert db in self.DATABASES, \
+        db_name = self.wrapped_router.db_for_read(model, **hints)
+        assert db_name in self.DATABASES, \
             "wrapped router's db_for_read should return a known database"
-        key = self._make_db_key(db)
+        key = self._make_db_key(db_name)
 
         # Caching
         try:
@@ -128,7 +151,7 @@ class ReplicationRouter(object):
         except KeyError:
             pass
 
-        slaves = self.db_to_slaves.get(db) or [db]
+        slaves = self.db_to_slaves.get(db_name) or [db_name]
         slaves = slaves[:]  # copy
         random.shuffle(slaves)
         for slave in slaves:
@@ -136,7 +159,7 @@ class ReplicationRouter(object):
                 chosen = slave
                 break
         else:
-            chosen = db
+            chosen = db_name
 
         self.context.chosen[key] = chosen
 
