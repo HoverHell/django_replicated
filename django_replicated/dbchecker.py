@@ -46,6 +46,10 @@ def is_writable(connection):
         cursor.execute('SELECT @@read_only')
         return not int(cursor.fetchone()[0])
 
+    elif connection.vendor in ('postgresql', 'postgis'):  # XXX: does 'postgis' still exist as a vendor?
+        cursor.execute('SELECT pg_is_in_recovery()')
+        return not cursor.fetchone()[0]
+
     elif connection.vendor == 'oracle':
         cursor.execute('SELECT open_mode FROM v$database')
         return cursor.fetchone()[0] != 'READ ONLY'
