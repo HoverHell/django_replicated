@@ -6,6 +6,7 @@ import mock
 
 from django import db
 from django.db import models, router as django_router
+from django.test.utils import override_settings
 
 
 from django_replicated.router import ReplicationRouter

@@ -1,5 +1,9 @@
 # coding: utf-8
+
 from __future__ import unicode_literals
+
+import random
+import copy
 
 from django import db
 
@@ -88,3 +92,9 @@ class SettingsProxy(object):
             return getattr(self.django_settings, k)
         except AttributeError:
             return getattr(self.default_settings, k)
+
+
+def shuffled(value, **kwargs):
+    value = copy.copy(value)
+    random.shuffle(value, **kwargs)
+    return value

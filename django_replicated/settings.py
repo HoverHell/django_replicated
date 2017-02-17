@@ -12,6 +12,9 @@ REPLICATED_DATABASE_DOWNTIME = 60
 # Warning: instead of this, use 'SLAVES' list on the database config in DATABASES.
 REPLICATED_DATABASE_SLAVES = []
 
+# List of master database aliases. Default is to only be the 'default' database
+REPLICATED_DATABASE_MASTERS = []
+
 # View name to state mapping
 REPLICATED_VIEWS_OVERRIDES = {}
 
@@ -35,3 +38,7 @@ REPLICATED_CHECK_STATE_ON_WRITE = True
 
 # Status codes on which set cookie for read-after-write workaround
 REPLICATED_FORCE_MASTER_COOKIE_STATUS_CODES = (302, 303)
+
+# Whether the master db should be checked before use.
+# Only useful for multi-master, and dangerous even then.
+REPLICATED_ALLOW_MASTER_FALLBACK = False
