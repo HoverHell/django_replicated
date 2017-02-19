@@ -1,204 +1,200 @@
 # coding: utf-8
 from __future__ import unicode_literals
 
-import random
 from itertools import chain
 from threading import local
-from .utils import import_string
 from django.utils.six import string_types
+from .utils import import_string, shuffled
+from . import settings as default_settings
 
-from .utils import SettingsProxy, shuffled
 
+class ReplicationRouterBase(object):
+    """
+    A base class to build subrouters on.
+    """
 
-class ReplicationRouter(object):
+    # Timeout for dead databases alive check
+    REPLICATED_DATABASE_DOWNTIME = 60
+
+    # List of slave database aliases. Default database is always master.
+    REPLICATED_DATABASE_SLAVES = []
+
+    REPLICATED_CHECK_IS_ALIVE = True
+    REPLICATED_READ_ONLY_DOWNTIME = default_settings.REPLICATED_READ_ONLY_DOWNTIME
+    REPLICATED_READ_ONLY_TRIES = default_settings.REPLICATED_READ_ONLY_TRIES
+
+    # Enable or disable state checking on writes
+    REPLICATED_CHECK_STATE_ON_WRITE = True
+
+    # ### Overridable (in many ways) extensible settings management ###
+
+    _settings_tag = "REPLICATED_"
+
+    def _get_setting(self, key):
+        tag = self._settings_tag
+        if not key.startswith(tag):
+            attr = "{}{}".format(tag, key.upper())
+        else:
+            attr = key
+        return getattr(self, attr)
+
+    @classmethod
+    def _list_settings(cls):
+        tag = cls._settings_tag
+        return list(attr for attr in dir(cls) if attr.startswith(tag))
+
+    def _update_from_settings(self, settings):
+        """
+        Use some settings object to update settings on self.
+
+        WARNING: should be called before going into __init__ of this base class.
+        """
+        for key in self._list_settings():
+            try:
+                value = getattr(settings, key)
+            except AttributeError:
+                pass
+            else:
+                setattr(self, key, value)
+
+    def _update_from_dict(self, settings):
+        """
+        Use some convenient-ish dict to update settings on self.
+
+        WARNING: should be called before going into __init__ of this base class.
+        """
+        for key in self._list_settings():
+            dict_key = key[len(self._settings_tag):].lower()
+            try:
+                value = settings[dict_key]
+            except KeyError:
+                pass
+            else:
+                setattr(self, key, value)
+
+    # ### Overridable convenience properties ###
+
+    @property
+    def DATABASES(self):
+        from django.conf import settings
+        return settings.DATABASES
+
+    @property
+    def DEFAULT_DB(self):
+        from django.db import DEFAULT_DB_ALIAS
+        return DEFAULT_DB_ALIAS
+
+    class Context(local):
+        """ Thread-local holder of the execution context """
+        def __init__(self):
+            self.state_stack = []
+            self.chosen = {}
+            self.state_change_enabled = True
 
     def __init__(self):
-        from django.db import DEFAULT_DB_ALIAS
-        settings = SettingsProxy()
+        self.context = self.Context()
 
-        self._context = local()
-
-        self.DATABASES = settings.DATABASES
-        self.DEFAULT_DB_ALIAS = DEFAULT_DB_ALIAS
-        self.DOWNTIME = settings.REPLICATED_DATABASE_DOWNTIME
-        self.SLAVES_LEGACY = settings.REPLICATED_DATABASE_SLAVES
-        self.CHECK_STATE_ON_WRITE = settings.REPLICATED_CHECK_STATE_ON_WRITE
-        self.ALLOW_MASTER_FALLBACK = settings.REPLICATED_ALLOW_MASTER_FALLBACK
-
-        wrapped_router_cls = settings.REPLICATED_WRAPPED_ROUTER
-        if isinstance(wrapped_router_cls, string_types):
-            wrapped_router_cls = import_string(wrapped_router_cls)
-        self.wrapped_router = wrapped_router_cls()
-
-        # Build the mappings of various replica kinds.
-
-        db_to_slaves = {}
-        db_to_sync_slaves = {}
-        db_to_other_masters = {}
-        replica_kinds = (
-            # (settings_key, mapping)
-            ('SLAVE_TO', db_to_slaves),
-            ('SUBMASTER_TO', db_to_other_masters),
-            ('SYNC_SLAVE_TO', db_to_sync_slaves),
-        )
-        for db_name, db_conf in self.DATABASES.items():
-            for conf_key, target_mapping in replica_kinds:
-                conf_value = db_conf.get(conf_key)  # e.g. the name of the master database
-                if conf_value:
-                    # e.g. associate the current db as slave to that master database.
-                    target_mapping.setdefault(conf_value, []).append(db_name)
-
-        self.db_to_slaves = db_to_slaves
-        self.db_to_sync_slaves = db_to_sync_slaves
-        self.db_to_other_masters = db_to_other_masters
-
-        # Legacy support: separate option with a list of slaves.
-        # Append + uniq to the existing list.
-        if self.SLAVES_LEGACY:
-            def_slaves = db_to_slaves.get(self.DEFAULT_DB_ALIAS, [])
-            def_slaves.extend(self.SLAVES_LEGACY)
-            def_slaves = list(set(def_slaves))
-            db_to_slaves[self.DEFAULT_DB_ALIAS] = def_slaves
-
-        # Mapping from the database to its primary master, for `allow_relation`.
-        db_to_master = {}
-        all_mappings = chain(
-            db_to_slaves.items(), db_to_sync_slaves.items(),
-            db_to_other_masters.items())
-        for db_name, db_slaves in all_mappings:
-            for db_slave in db_slaves:
-                db_to_master[db_slave] = db_name
-
-        self.db_to_master = db_to_master
-
-    def _init_context(self):
-        self._context.state_stack = []
-        self._context.chosen = {}
-        self._context.state_change_enabled = True
-        self._context.inited = True
+        self.all_allowed_aliases = [self.DEFAULT_DB] + self._get_setting('database_slaves')
 
     def _get_alive_database(self, db_choices, fallback):
+        """ Helper to find a database that is alive """
         for db_name in db_choices:
             if self.is_alive(db_name):
                 return db_name
         return fallback
 
-    def _get_actual_slave(self, db_name):
-        slaves = shuffled(self.db_to_slaves.get(db_name) or [])
-        submasters = shuffled(self.db_to_other_masters.get(db_name) or [])
+    def _get_actual_master(self, model, **kwargs):
+        return self.DEFAULT_DB
 
-        # Try masters too if slaves cannot be used,
+    def _get_possible_slaves(self, **kwargs):
+        return shuffled(self._get_setting('database_slaves'))
+
+    def _get_actual_slave(self, model, **kwargs):
+        possible_slaves = self._get_possible_slaves(model=model, **kwargs)
         # Fallback to the db itself without even checking.
-        return self._get_alive_database(slaves + submasters, fallback=db_name)
-
-    def _get_actual_master(self, db_name):
-        try:
-            chosen = self._context.actual_master  # Be persistent about it.
-            if self.ALLOW_MASTER_FALLBACK:
-                if not self.is_alive(chosen):
-                    raise RuntimeError("(internal, chosen master is not alive anymore)")
-        except (AttributeError, RuntimeError):
-            # Be predictable here. No shuffle for master.
-            submasters = self.db_to_other_masters.get(db_name) or []
-            chosen = self._get_alive_database([db_name] + submasters, fallback=db_name)
-            self.context.actual_master = chosen
-        return chosen
-
-    @property
-    def context(self):
-        if not getattr(self._context, 'inited', False):
-            self._init_context()
-        return self._context
+        return self._get_alive_database(possible_slaves, fallback=self.DEFAULT_DB)
 
     def init(self, state):
-        self._init_context()
+        self.context = self.Context()  # cleanup
         self.use_state(state)
 
     def is_alive(self, db_name, **kwargs):
-        # # TODO: Allow the wrapped router to have a say in it.
-        # wrapped_is_alive = getattr(self.wrapped_router, 'is_alive', None)
-        # if wrapped_is_alive is not None:
-        #     wrapped_result = wrapped_is_alive(db_name, **kwargs)
-        #     if wrapped_result is not None:
-        #         return wrapped_result
+        if not self._get_setting('check_is_alive'):
+            return True
 
         from .dbchecker import db_is_alive
 
-        return db_is_alive(db_name, self.DOWNTIME)
+        return db_is_alive(db_name, cache_seconds=self._get_setting('database_downtime'))
 
     def set_state_change(self, enabled):
         self.context.state_change_enabled = enabled
 
-    def state(self):
-        '''
-        Current state of routing: 'master' or 'slave'.
-        '''
-        if self.context.state_stack:
+    def state(self, default='master'):
+        """
+        Current state of routing, e.g. 'master' or 'slave'.
+        """
+        try:
             return self.context.state_stack[-1]
-        else:
-            return 'master'
+        except IndexError:
+            return default
 
     def use_state(self, state):
-        '''
-        Switches router into a new state. Requires a paired call
-        to 'revert' for reverting to previous state.
-        '''
+        """
+        Switch router into a new state.
+
+        WARNING: Requires a paired call to 'revert' for reverting to the
+        previous state.
+        """
         if not self.context.state_change_enabled:
             state = self.state()
         self.context.state_stack.append(state)
         return self
 
     def revert(self):
-        '''
-        Reverts wrapper state to a previous value after calling
-        'use_state'.
-        '''
+        """
+        Reverts wrapper state to a previous value after calling 'use_state'.
+        """
         self.context.state_stack.pop()
 
-    def _make_db_key(self, db, state=None):
-        state = self.state() if state is None else state
-        return "{}__{}".format(state, db)
-
     def db_for_write(self, model, **hints):
-        if self.state() != 'master':
-            if self.CHECK_STATE_ON_WRITE:
+        state = self.state()
+        if state != 'master':
+            if self._get_setting('check_state_on_write'):
                 raise RuntimeError('Trying to access master database in slave state')
             # (?) else: self.use_state('master'); but would need a revert too.
             # (?) else: self.context.state_stack[-1] = 'master'  # self.override_state('master')
 
-        # The wrapped router is primarily for selecting the main database.
-        db_name = self.wrapped_router.db_for_write(model, **hints)
-        assert db_name in self.DATABASES, \
-            "wrapped router's db_for_write should return a known database"
-
-        key = self._make_db_key(db_name)
-        chosen = self._get_actual_master(db_name)
-        self.context.chosen[key] = chosen
+        # XXXX: try: return self.context.chosen[state]
+        chosen = self._get_actual_master(model, **hints)
+        self.context.chosen[state] = chosen
         return chosen
 
     def db_for_read(self, model, **hints):
-        if self.state() == 'master':
+        state = self.state()
+        if state != 'slave':
             return self.db_for_write(model, **hints)
-
-        db_name = self.wrapped_router.db_for_read(model, **hints)
-        assert db_name in self.DATABASES, \
-            "wrapped router's db_for_read should return a known database"
-        key = self._make_db_key(db_name)
 
         # Caching
         try:
-            return self.context.chosen[key]
+            return self.context.chosen[state]
         except KeyError:
             pass
 
-        chosen = self._get_actual_slave(db_name)
-
-        self.context.chosen[key] = chosen
-
+        chosen = self._get_actual_slave(model, **hints)
+        self.context.chosen[state] = chosen
         return chosen
 
     def allow_relation(self, obj1, obj2, **hints):
-        objs = [obj1, obj2]
-        dbs = [self.db_to_master.get(obj._state.db) for obj in objs]
-        db1, db2 = dbs
-        return db1 == db2
+        for db in (obj1._state.db, obj2._state.db):
+            if db is not None and db not in self.all_allowed_aliases:
+                return False
+        return True
+
+
+class ReplicationRouter(ReplicationRouterBase):
+    """ A 'default' instance that initializes itself from django settings """
+
+    def __init__(self):
+        from django.conf import settings
+        self._update_from_settings(settings)
+        super(ReplicationRouter, self).__init__()

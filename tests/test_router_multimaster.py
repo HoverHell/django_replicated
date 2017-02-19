@@ -9,7 +9,7 @@ from django import db
 from django.db import models
 
 from .test_router import model
-from django_replicated.router import ReplicationRouter
+from django_replicated.router_multimaster import ReplicationMultiMasterRouter
 
 pytestmark = pytest.mark.django_db
 
@@ -17,12 +17,13 @@ pytestmark = pytest.mark.django_db
 @pytest.fixture
 def multimaster_settings(settings):
     base_config = settings.DATABASES['default']
-    settings.DATABASES.update(master2=dict(base_config, SUBMASTER_TO='default'))
+    settings.DATABASES.update(master2=dict(base_config))
+    settings.REPLICATED_DATABASE_SUBMASTERS = ['master2']
     settings.REPLICATED_ALLOW_MASTER_FALLBACK = True
 
 
 def test_router_multimaster(model, multimaster_settings):
-    router = ReplicationRouter()
+    router = ReplicationMultiMasterRouter()
 
     assert router.db_for_write(model) == 'default'
     assert router.db_for_write(model) == 'default', 'Master should not be random on choices'

@@ -12,10 +12,11 @@ def pytest_configure():
     settings.configure(
         DATABASES={
             'default': {'ENGINE': 'django.db.backends.sqlite3'},
-            'slave1': {'ENGINE': 'django.db.backends.sqlite3', 'SLAVE_TO': 'default'},
-            'slave2': {'ENGINE': 'django.db.backends.sqlite3', 'SLAVE_TO': 'default'},
+            'slave1': {'ENGINE': 'django.db.backends.sqlite3'},
+            'slave2': {'ENGINE': 'django.db.backends.sqlite3'},
         },
         DATABASE_ROUTERS=['django_replicated.router.ReplicationRouter'],
         MIDDLEWARE_CLASSES=['django_replicated.middleware.ReplicationMiddleware'],
+        REPLICATED_DATABASE_SLAVES=['slave1', 'slave2'],
         ROOT_URLCONF='tests._test_urls',
     )

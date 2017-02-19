@@ -10,11 +10,12 @@ from django.utils import six, functional
 
 from . import dbchecker
 from .utils import routers, get_object_name, SettingsProxy
+
 settings = SettingsProxy()
 
 
 class ReplicationMiddleware(object):
-    '''
+    """
     Middleware for automatically switching routing state to
     master or slave depending on request method.
 
@@ -27,9 +28,12 @@ class ReplicationMiddleware(object):
     pages to a user. However in this case slave replicas may not yet be
     updated to match master. Thus first redirect after POST is pointed to
     master connection even if it only GETs data.
-    '''
+    """
+
     def __init__(self, forced_state=None):
         self.forced_state = forced_state
+
+    _safe_methods = ('GET', 'HEAD')
 
     def process_request(self, request):
         if self.forced_state is not None:
@@ -37,7 +41,10 @@ class ReplicationMiddleware(object):
         elif request.META.get(settings.REPLICATED_FORCE_STATE_HEADER) in ('master', 'slave'):
             state = request.META[settings.REPLICATED_FORCE_STATE_HEADER]
         else:
-            state = 'slave' if request.method in ['GET', 'HEAD'] else 'master'
+            if request.method in self._safe_methods:
+                state = 'slave'
+            else:
+                state = 'master'
             state = self.check_state_override(request, state)
 
         routers.init(state)
@@ -47,19 +54,19 @@ class ReplicationMiddleware(object):
         return response
 
     def check_state_override(self, request, state):
-        '''
+        """
         Used to check if a web request should use a master or slave
         database besides default choice.
-        '''
-        if request.COOKIES.get(settings.REPLICATED_FORCE_MASTER_COOKIE_NAME) == 'true':
-            return 'master'
+        """
+        if request.COOKIES.get(settings.REPLICATED_FORCE_MASTER_COOKIE_NAME):
+            return 'master'  # TODO: make up some other value for this case.
 
         overrides = settings.REPLICATED_VIEWS_OVERRIDES
 
         if overrides:
             match = urlresolvers.resolve(request.path_info)
 
-            import_path = '%s.%s' % (get_object_name(inspect.getmodule(match.func)),
+            import_path = "%s.%s" % (get_object_name(inspect.getmodule(match.func)),
                                      get_object_name(match.func))
 
             for lookup_view, forced_state in six.iteritems(overrides):
@@ -70,12 +77,12 @@ class ReplicationMiddleware(object):
         return state
 
     def handle_redirect_after_write(self, request, response):
-        '''
+        """
         Sets a flag using cookies to redirect requests happening after
         successful write operations to ensure that corresponding read
         request will use master database. This avoids situation when
         replicas lagging behind on updates a little.
-        '''
+        """
         force_master_codes = settings.REPLICATED_FORCE_MASTER_COOKIE_STATUS_CODES
         if response.status_code in force_master_codes and routers.state() == 'master':
             self.set_force_master_cookie(response)
@@ -83,15 +90,18 @@ class ReplicationMiddleware(object):
             if settings.REPLICATED_FORCE_MASTER_COOKIE_NAME in request.COOKIES:
                 response.delete_cookie(settings.REPLICATED_FORCE_MASTER_COOKIE_NAME)
 
-    def set_force_master_cookie(self, response):
-        '''
+    @classmethod
+    def set_force_master_cookie(cls, response):
+        """
         Use it to explicitly use master on next request to your app.
-        '''
-        response.set_cookie(settings.REPLICATED_FORCE_MASTER_COOKIE_NAME, 'true',
-                            max_age=settings.REPLICATED_FORCE_MASTER_COOKIE_MAX_AGE)
+        """
+        response.set_cookie(
+            settings.REPLICATED_FORCE_MASTER_COOKIE_NAME, 'true',
+            max_age=settings.REPLICATED_FORCE_MASTER_COOKIE_MAX_AGE)
 
 
 class ReadOnlyMiddleware(object):
+
     def process_request(self, request):
         request.service_is_readonly = functional.SimpleLazyObject(self.is_service_read_only)
 
