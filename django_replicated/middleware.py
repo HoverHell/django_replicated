@@ -38,7 +38,7 @@ class ReplicationMiddleware(object):
     def process_request(self, request):
         if self.forced_state is not None:
             state = self.forced_state
-        elif request.META.get(settings.REPLICATED_FORCE_STATE_HEADER) in ('master', 'slave'):
+        elif request.META.get(settings.REPLICATED_FORCE_STATE_HEADER):
             state = request.META[settings.REPLICATED_FORCE_STATE_HEADER]
         else:
             if request.method in self._safe_methods:
@@ -59,7 +59,7 @@ class ReplicationMiddleware(object):
         database besides default choice.
         """
         if request.COOKIES.get(settings.REPLICATED_FORCE_MASTER_COOKIE_NAME):
-            return 'master'  # TODO: make up some other value for this case.
+            return 'master_forced'
 
         overrides = settings.REPLICATED_VIEWS_OVERRIDES
 

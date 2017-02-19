@@ -23,7 +23,9 @@ class ReplicationRouterBase(object):
     REPLICATED_READ_ONLY_DOWNTIME = default_settings.REPLICATED_READ_ONLY_DOWNTIME
     REPLICATED_READ_ONLY_TRIES = default_settings.REPLICATED_READ_ONLY_TRIES
 
-    # Enable or disable state checking on writes
+    # Enable or disable state checking on writes.
+    # If disabled, db_for_write will cause side effects (use of master database
+    # for further reads).
     REPLICATED_CHECK_STATE_ON_WRITE = True
 
     # ### Overridable (in many ways) extensible settings management ###
@@ -41,6 +43,7 @@ class ReplicationRouterBase(object):
     @classmethod
     def _list_settings(cls):
         tag = cls._settings_tag
+        # For DRY extensibility.
         return list(attr for attr in dir(cls) if attr.startswith(tag))
 
     def _update_from_settings(self, settings):
@@ -86,6 +89,7 @@ class ReplicationRouterBase(object):
 
     class Context(local):
         """ Thread-local holder of the execution context """
+
         def __init__(self):
             self.state_stack = []
             self.chosen = {}
@@ -161,10 +165,11 @@ class ReplicationRouterBase(object):
         if state != 'master':
             if self._get_setting('check_state_on_write'):
                 raise RuntimeError('Trying to access master database in slave state')
-            # (?) else: self.use_state('master'); but would need a revert too.
-            # (?) else: self.context.state_stack[-1] = 'master'  # self.override_state('master')
+            # Otherwise: see below.
 
-        # XXXX: try: return self.context.chosen[state]
+        # Tricky point: context is not read here, but saved, and it is shared
+        # for reading and writing. Because of this, reading-after-writing leads
+        # to the master database.
         chosen = self._get_actual_master(model, **hints)
         self.context.chosen[state] = chosen
         return chosen

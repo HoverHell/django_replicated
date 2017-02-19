@@ -9,7 +9,7 @@ from django import db
 from django.db import models
 
 from django_replicated.router_multidb import OverridesReplicationRouter
-from .test_router import model, django_router as django_router_base
+from .test_router import model
 
 pytestmark = pytest.mark.django_db
 
@@ -33,7 +33,7 @@ def multidb_settings(settings):
         ),
     )
     extra_databases.update(
-        (name, dict(base_config, SLAVE_TO='db2'))
+        (name, dict(base_config))
         for name in slaves)
     settings.DATABASES.update(extra_databases)  # XX: does the pytest-django's mockup handle this?
 
