@@ -84,7 +84,12 @@ class ReplicationMiddleware(object):
         replicas lagging behind on updates a little.
         """
         force_master_codes = settings.REPLICATED_FORCE_MASTER_COOKIE_STATUS_CODES
-        if response.status_code in force_master_codes and routers.state() == 'master':
+        # TODO?: do the first check in the 'process_response'?
+        if getattr(response, '_replicated_skip_force_master', False):
+            # For inconsequential writes (e.g. logs) and 'post as get' requests
+            # (e.g. when urlencode is too small/flat).
+            pass
+        elif response.status_code in force_master_codes and routers.state() == 'master':
             self.set_force_master_cookie(response)
         else:
             if settings.REPLICATED_FORCE_MASTER_COOKIE_NAME in request.COOKIES:
