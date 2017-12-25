@@ -40,6 +40,8 @@ class Routers(object):
         methods = list(method for method in methods if method is not None)
         if not methods:
             raise AttributeError("No router with the method %r." % (name,))
+        if not all(callable(method) for method in methods):
+            raise AttributeError("Currently, only methods/callables are supported here")
         return self._make_methods_wrapper(methods)
 
     @classmethod
