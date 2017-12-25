@@ -2,10 +2,14 @@
 from __future__ import unicode_literals
 
 from itertools import chain
+import logging
+import random
 from threading import local
 from django.utils.six import string_types
 from .utils import import_string, shuffled
 from . import settings as default_settings
+
+log = logging.getLogger(__name__)
 
 
 class ReplicationRouterBase(object):
@@ -31,6 +35,8 @@ class ReplicationRouterBase(object):
     # ### Overridable (in many ways) extensible settings management ###
 
     _settings_tag = "REPLICATED_"
+
+    _context = None
 
     def _get_setting(self, key):
         tag = self._settings_tag
@@ -96,9 +102,15 @@ class ReplicationRouterBase(object):
             self.state_change_enabled = True
 
     def __init__(self):
-        self.context = self.Context()
-
         self.all_allowed_aliases = [self.DEFAULT_DB] + self._get_setting('database_slaves')
+        self.reset()
+
+    def get_all_allowed_aliases(self):
+        """
+        An explicit getter for `self.all_allowed_aliases` to play more nicely
+        with `.utils.Routers`.
+        """
+        return self.all_allowed_aliases
 
     def _get_alive_database(self, db_choices, fallback):
         """ Helper to find a database that is alive """
@@ -118,8 +130,17 @@ class ReplicationRouterBase(object):
         # Fallback to the db itself without even checking.
         return self._get_alive_database(possible_slaves, fallback=self.DEFAULT_DB)
 
+    def reset(self):
+        self._context = self.Context()
+
+    @property
+    def context(self):
+        if self._context is None:
+            self.reset()
+        return self._context
+
     def init(self, state):
-        self.context = self.Context()  # cleanup
+        self.reset()
         self.use_state(state)
 
     def is_alive(self, db_name, **kwargs):
@@ -160,9 +181,9 @@ class ReplicationRouterBase(object):
         """
         self.context.state_stack.pop()
 
-    def db_for_write(self, model, **hints):
+    def db_for_write(self, model=None, **hints):
         state = self.state()
-        if state != 'master':
+        if state == 'slave':  # `not in ('master', 'master_forced')` with the default middleware.
             if self._get_setting('check_state_on_write'):
                 raise RuntimeError('Trying to access master database in slave state')
             # Otherwise: see below.
@@ -172,9 +193,10 @@ class ReplicationRouterBase(object):
         # to the master database.
         chosen = self._get_actual_master(model, **hints)
         self.context.chosen[state] = chosen
+        log.debug('db_for_write: %s', chosen)
         return chosen
 
-    def db_for_read(self, model, **hints):
+    def db_for_read(self, model=None, **hints):
         state = self.state()
         if state != 'slave':
             return self.db_for_write(model, **hints)
@@ -187,6 +209,7 @@ class ReplicationRouterBase(object):
 
         chosen = self._get_actual_slave(model, **hints)
         self.context.chosen[state] = chosen
+        log.debug('db_for_read: %s', chosen)
         return chosen
 
     def allow_relation(self, obj1, obj2, **hints):

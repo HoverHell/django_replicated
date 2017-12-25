@@ -5,16 +5,17 @@ import logging
 import socket
 from functools import partial
 
+import django
+from django.conf import settings
 from django.core.cache import DEFAULT_CACHE_ALIAS
-from django.utils import timezone
 from django.db import connections
 
-try:
+if django.VERSION < (1, 7):
+    # https://docs.djangoproject.com/en/1.7/topics/cache/#django.core.cache.get_cache
     from django.core.cache import get_cache
-except ImportError: # Django >= 1.7
+else:
     from django.core.cache import caches
-
-    get_cache = lambda alias: caches[alias]
+    def get_cache(alias): return caches[alias]
 
 
 from .utils import get_object_name, SettingsProxy
@@ -31,7 +32,13 @@ hostname = socket.getfqdn()
 def is_alive(connection):
     if connection.connection is not None and hasattr(connection.connection, 'ping'):
         log.debug('Ping db: %s', connection.alias)
-        connection.connection.ping()
+        try:
+            # Since MySQL-python 1.2.2 connection.ping()
+            # takes an optional boolean argument to enable automatic reconnection.
+            # https://github.com/farcepest/MySQLdb1/blob/d34fac681487541e4be07e6978e0db233faf8252/HISTORY#L103
+            connection.connection.ping(True)
+        except TypeError:
+            connection.connection.ping()
     else:
         log.debug('Get cursor for db: %s', connection.alias)
         connection.cursor()
@@ -46,7 +53,7 @@ def is_writable(connection):
         cursor.execute('SELECT @@read_only')
         return not int(cursor.fetchone()[0])
 
-    elif connection.vendor in ('postgresql', 'postgis'):  # XXX: does 'postgis' still exist as a vendor?
+    elif connection.vendor in ('postgresql', 'postgresql_psycopg2', 'postgis'):
         cursor.execute('SELECT pg_is_in_recovery()')
         return not cursor.fetchone()[0]
 
@@ -71,14 +78,14 @@ def check_db(checker, db_name, cache_seconds=None, number_of_tries=1, force=Fals
 
         if is_dead:
             log.debug(
-                'Last check "%s" %s was less than %d ago, no check needed',
+                'Check "%s" %s was failed less than %d ago, no check needed',
                 checker_name, db_name, cache_seconds
             )
 
             return False
         else:
             log.debug(
-                'Last check "%s" %s was more than %d ago, checking again',
+                'Last check "%s" %s succeeded or was more than %d ago, checking again',
                 db_name, checker_name, cache_seconds
             )
     else:
@@ -102,6 +109,9 @@ def check_db(checker, db_name, cache_seconds=None, number_of_tries=1, force=Fals
             'After %d tries "%s" %s = %s',
             count, db_name, checker_name, result
         )
+
+        if result:
+            break
 
     if not result and cache_seconds is not None:
         cache.set(cache_key, dead_mark, cache_seconds)

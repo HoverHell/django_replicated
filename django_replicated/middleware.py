@@ -2,11 +2,25 @@
 from __future__ import unicode_literals
 
 import inspect
+import logging
+import fnmatch
 from functools import partial
 
 from django import db
-from django.core import urlresolvers
+from django.conf import settings
 from django.utils import six, functional
+
+try:  # django 1.10+
+    from django import urls
+except ImportError:
+    from django.core import urlresolvers as urls
+
+try:  # django 1.10+
+    from django.utils.deprecation import MiddlewareMixin
+except ImportError:
+    class MiddlewareMixin(object):
+        def __init__(self, get_response=None):
+            pass
 
 from . import dbchecker
 from .utils import routers, get_object_name, SettingsProxy
@@ -14,8 +28,11 @@ from .utils import routers, get_object_name, SettingsProxy
 settings = SettingsProxy()
 
 
-class ReplicationMiddleware(object):
-    """
+log = logging.getLogger(__name__)
+
+
+class ReplicationMiddleware(MiddlewareMixin):
+    '''
     Middleware for automatically switching routing state to
     master or slave depending on request method.
 
@@ -28,9 +45,10 @@ class ReplicationMiddleware(object):
     pages to a user. However in this case slave replicas may not yet be
     updated to match master. Thus first redirect after POST is pointed to
     master connection even if it only GETs data.
-    """
+    '''
+    def __init__(self, get_response=None, forced_state=None):
+        super(ReplicationMiddleware, self).__init__(get_response=get_response)
 
-    def __init__(self, forced_state=None):
         self.forced_state = forced_state
 
     _safe_methods = ('GET', 'HEAD')
@@ -38,19 +56,47 @@ class ReplicationMiddleware(object):
     def process_request(self, request):
         if self.forced_state is not None:
             state = self.forced_state
-        elif request.META.get(settings.REPLICATED_FORCE_STATE_HEADER):
+            log.debug('state by .forced_state attr: %s', state)
+        elif request.META.get(settings.REPLICATED_FORCE_STATE_HEADER):  # TODO: `in _known_states`.
             state = request.META[settings.REPLICATED_FORCE_STATE_HEADER]
+            log.debug('state by header: %s', state)
         else:
             if request.method in self._safe_methods:
                 state = 'slave'
             else:
                 state = 'master'
+            log.debug('state by request method: %s', state)
             state = self.check_state_override(request, state)
+            log.debug('state after override: %s', state)
 
+            log.debug('init state: %s', state)
         routers.init(state)
+
+    def set_non_atomic_dbs(self, view):
+        default_attr = '_replicated_view_default_non_atomic_dbs'
+        default_set = getattr(view, default_attr, None)
+        # If default_set is None then this first request. Set default.
+        if default_set is None:
+            view_set = getattr(view, '_non_atomic_requests', set())
+            setattr(view, default_attr, view_set)
+            default_set = view_set
+
+        all_allowed_aliases = routers.get_all_allowed_aliases()
+        # If state master db_for_read() == db_for_write()
+        current_alias = routers.db_for_read()
+        not_used_aliases = set(
+            alias for alias in all_allowed_aliases
+            if alias != current_alias
+        )
+        view._non_atomic_requests = not_used_aliases | default_set
+
+    def process_view(self, request, view, *args):
+        if settings.REPLICATED_MANAGE_ATOMIC_REQUESTS:
+            self.set_non_atomic_dbs(view)
 
     def process_response(self, request, response):
         self.handle_redirect_after_write(request, response)
+        routers.reset()
         return response
 
     def check_state_override(self, request, state):
@@ -64,16 +110,19 @@ class ReplicationMiddleware(object):
         overrides = settings.REPLICATED_VIEWS_OVERRIDES
 
         if overrides:
-            match = urlresolvers.resolve(request.path_info)
+            match = urls.resolve(request.path_info)
 
             import_path = "%s.%s" % (get_object_name(inspect.getmodule(match.func)),
                                      get_object_name(match.func))
 
             for lookup_view, forced_state in six.iteritems(overrides):
-                if match.url_name == lookup_view or import_path == lookup_view:
+                if (
+                    match.url_name == lookup_view or
+                    import_path == lookup_view or
+                    fnmatch.fnmatchcase(request.path_info, lookup_view)
+                ):
                     state = forced_state
                     break
-
         return state
 
     def handle_redirect_after_write(self, request, response):
@@ -84,12 +133,15 @@ class ReplicationMiddleware(object):
         replicas lagging behind on updates a little.
         """
         force_master_codes = settings.REPLICATED_FORCE_MASTER_COOKIE_STATUS_CODES
+
         # TODO?: do the first check in the 'process_response'?
         if getattr(response, '_replicated_skip_force_master', False):
             # For inconsequential writes (e.g. logs) and 'post as get' requests
             # (e.g. when urlencode is too small/flat).
             pass
+            log.debug('skip force-master cookie by response flag')
         elif response.status_code in force_master_codes and routers.state() == 'master':
+            log.debug('set force master cookie for %s', request.path)
             self.set_force_master_cookie(response)
         else:
             if settings.REPLICATED_FORCE_MASTER_COOKIE_NAME in request.COOKIES:
@@ -105,8 +157,7 @@ class ReplicationMiddleware(object):
             max_age=settings.REPLICATED_FORCE_MASTER_COOKIE_MAX_AGE)
 
 
-class ReadOnlyMiddleware(object):
-
+class ReadOnlyMiddleware(MiddlewareMixin):
     def process_request(self, request):
         request.service_is_readonly = functional.SimpleLazyObject(self.is_service_read_only)
 

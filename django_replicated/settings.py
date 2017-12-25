@@ -14,10 +14,7 @@ REPLICATED_VIEWS_OVERRIDES = {}
 # Header name for forcing state switch
 REPLICATED_FORCE_STATE_HEADER = 'HTTP_X_REPLICATED_STATE'
 
-# Status codes on which set cookie for read-after-write workaround
-REPLICATED_FORCE_MASTER_COOKIE_STATUS_CODES = (302, 303)
-
-# Cookie life time in minutes
+# Cookie life time in seconds
 REPLICATED_FORCE_MASTER_COOKIE_MAX_AGE = 5
 
 # ### Settings used in both router and middleware ###
@@ -25,5 +22,11 @@ REPLICATED_FORCE_MASTER_COOKIE_MAX_AGE = 5
 # Timeout for dead databases alive check for read only flag
 REPLICATED_READ_ONLY_DOWNTIME = 20
 
-# Number of retries before set read only flag
+# Number of retries before the read only flag is set
 REPLICATED_READ_ONLY_TRIES = 1
+
+# Status codes on which set cookie for read-after-write workaround
+REPLICATED_FORCE_MASTER_COOKIE_STATUS_CODES = (302, 303)
+
+# ...
+REPLICATED_MANAGE_ATOMIC_REQUESTS = False
