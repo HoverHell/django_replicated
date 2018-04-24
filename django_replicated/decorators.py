@@ -41,11 +41,13 @@ except ImportError:
             return inner
 
 use_state = decorator_from_middleware_with_args(ReplicationMiddleware)
-use_master = use_state('master')
-use_slave = use_state('slave')
+
+use_master = use_state(forced_state='master')
+use_slave = use_state(forced_state='slave')
 
 
 class use_state_simple(ContextDecorator):
+
     def __init__(self, state):
         self.state = state
 

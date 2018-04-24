@@ -4,6 +4,7 @@ from __future__ import unicode_literals
 import inspect
 import logging
 import fnmatch
+import types
 from functools import partial
 
 from django import db
@@ -73,6 +74,9 @@ class ReplicationMiddleware(MiddlewareMixin):
         routers.init(state)
 
     def set_non_atomic_dbs(self, view):
+        if isinstance(view, types.MethodType):
+            view = six.get_method_function(view)
+
         default_attr = '_replicated_view_default_non_atomic_dbs'
         default_set = getattr(view, default_attr, None)
         # If default_set is None then this first request. Set default.
@@ -107,23 +111,35 @@ class ReplicationMiddleware(MiddlewareMixin):
         if request.COOKIES.get(settings.REPLICATED_FORCE_MASTER_COOKIE_NAME):
             return 'master_forced'
 
+        override_state = self.get_state_override(request)
+        if override_state is not None:
+            state = override_state
+        return state
+
+    def get_state_override(self, request):
         overrides = settings.REPLICATED_VIEWS_OVERRIDES
 
-        if overrides:
-            match = urls.resolve(request.path_info)
+        if not overrides:
+            return
 
-            import_path = "%s.%s" % (get_object_name(inspect.getmodule(match.func)),
-                                     get_object_name(match.func))
+        match = urls.resolve(request.path_info)
 
-            for lookup_view, forced_state in six.iteritems(overrides):
-                if (
-                    match.url_name == lookup_view or
-                    import_path == lookup_view or
-                    fnmatch.fnmatchcase(request.path_info, lookup_view)
-                ):
-                    state = forced_state
-                    break
-        return state
+        import_path = '%s.%s' % (get_object_name(inspect.getmodule(match.func)),
+                                 get_object_name(match.func))
+
+        for lookup_view, forced_state in six.iteritems(overrides):
+            if (
+                self.is_override_matched(match, lookup_view) or
+                import_path == lookup_view or
+                fnmatch.fnmatchcase(request.path_info, lookup_view)
+            ):
+                return forced_state
+
+    def is_override_matched(self, match, lookup_view):
+        if ':' in lookup_view:
+            return match.view_name == lookup_view
+        else:
+            return match.url_name == lookup_view
 
     def handle_redirect_after_write(self, request, response):
         """
