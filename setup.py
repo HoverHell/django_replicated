@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 # coding: utf8
 
-from distutils.core import setup
+from setuptools import setup
 
 setup(
-    name='django_replicated',
+    name='django_replicated_ext',
     version='3.1',
     description='Django DB router for stateful master-slave replication',
     packages=[
